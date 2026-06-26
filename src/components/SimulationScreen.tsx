@@ -1,6 +1,13 @@
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { createCustomTeam, premierLeagueSimulationTeams } from "../data/premierLeagueTeams";
-import type { Fixture, FormationSlot, LeagueTableRow, SimulationStep, Team } from "../types";
+import type {
+  Fixture,
+  FormationSlot,
+  LeagueTableRow,
+  MatchResultCode,
+  SimulationStep,
+  Team,
+} from "../types";
 import { initializeLeagueTable, sortLeagueTable, updateLeagueTable } from "../utils/leagueTable";
 import { generateSimulationSteps } from "../utils/scheduleGenerator";
 import { simulateMatch } from "../utils/simulationEngine";
@@ -40,6 +47,32 @@ const createSeasonState = (teams: Team[]) => ({
   table: initializeLeagueTable(teams),
 });
 
+const CUSTOM_TEAM_ID = "custom-team";
+
+const createInitialTeamForm = (teams: Team[]): Record<string, MatchResultCode[]> =>
+  Object.fromEntries(teams.map((team) => [team.id, []]));
+
+const getBottomTenRatedTeamIds = (teams: Team[]): Set<string> =>
+  new Set(
+    [...teams]
+      .filter((team) => team.id !== CUSTOM_TEAM_ID)
+      .sort((a, b) => a.averageOverallRating - b.averageOverallRating)
+      .slice(0, 10)
+      .map((team) => team.id),
+  );
+
+const isUnbeatenInLastThree = (form: MatchResultCode[] | undefined): boolean =>
+  Boolean(form && form.length >= 3 && form.slice(-3).every((result) => result !== "L"));
+
+const appendFormResult = (
+  form: Record<string, MatchResultCode[]>,
+  teamId: string,
+  result: MatchResultCode,
+): Record<string, MatchResultCode[]> => ({
+  ...form,
+  [teamId]: [...(form[teamId] ?? []), result].slice(-3),
+});
+
 export function SimulationScreen({
   formationSlots,
   onRestartGame,
@@ -64,6 +97,9 @@ export function SimulationScreen({
   }, [customShortName, customTeamName, formationSlots]);
 
   const [{ steps, table }, setSeasonState] = useState(() => createSeasonState(teams));
+  const [teamForm, setTeamForm] = useState<Record<string, MatchResultCode[]>>(() =>
+    createInitialTeamForm(teams),
+  );
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
   const [fixtures, setFixtures] = useState<Fixture[]>(() =>
     steps.map((step) => step.customFixture),
@@ -82,6 +118,7 @@ export function SimulationScreen({
     setIsPaused(false);
     setIsSeasonComplete(false);
     setShowFinalModal(false);
+    setTeamForm(createInitialTeamForm(teams));
   }, [teams]);
 
   const sortedTable = useMemo(() => sortLeagueTable(table), [table]);
@@ -91,15 +128,29 @@ export function SimulationScreen({
   );
   const customRow = sortedTable.find((row) => row.teamId === "custom-team");
   const customPosition = sortedTable.findIndex((row) => row.teamId === "custom-team") + 1;
+  const bottomTenRatedTeamIds = useMemo(() => getBottomTenRatedTeamIds(teams), [teams]);
 
-  const simulateStep = (step: SimulationStep, currentTable: LeagueTableRow[]) => {
+  const simulateStep = (
+    step: SimulationStep,
+    currentTable: LeagueTableRow[],
+    currentForm: Record<string, MatchResultCode[]>,
+  ) => {
     const stepFixtures = [step.customFixture, ...step.backgroundFixtures];
     let nextTable = currentTable;
+    let nextForm = currentForm;
     const simulatedFixtures = stepFixtures.map((fixture) => {
+      const unbeatenBoostTeamIds = [fixture.homeTeamId, fixture.awayTeamId].filter(
+        (teamId) =>
+          bottomTenRatedTeamIds.has(teamId) && isUnbeatenInLastThree(currentForm[teamId]),
+      );
       const result = simulateMatch(fixture, teams, {
         boostLowerRatedTeam: !fixture.isCustomTeamFixture,
+        harderForCustomTeam: fixture.isCustomTeamFixture,
+        unbeatenBoostTeamIds,
       });
       nextTable = updateLeagueTable(nextTable, result);
+      nextForm = appendFormResult(nextForm, result.homeTeamId, result.homeResult);
+      nextForm = appendFormResult(nextForm, result.awayTeamId, result.awayResult);
       return { ...fixture, simulated: true, result };
     });
 
@@ -110,6 +161,7 @@ export function SimulationScreen({
       ),
     );
     setSeasonState((current) => ({ ...current, table: nextTable }));
+    setTeamForm(nextForm);
   };
 
   useEffect(() => {
@@ -126,7 +178,7 @@ export function SimulationScreen({
         return;
       }
 
-      simulateStep(step, table);
+      simulateStep(step, table, teamForm);
       const nextIndex = currentStepIndex + 1;
       setCurrentStepIndex(nextIndex);
 
@@ -138,7 +190,16 @@ export function SimulationScreen({
     }, speedDelays[speed]);
 
     return () => window.clearTimeout(timeoutId);
-  }, [currentStepIndex, isPaused, isSeasonComplete, isSimulating, speed, steps, table]);
+  }, [
+    currentStepIndex,
+    isPaused,
+    isSeasonComplete,
+    isSimulating,
+    speed,
+    steps,
+    table,
+    teamForm,
+  ]);
 
   if (!squadComplete) {
     return (

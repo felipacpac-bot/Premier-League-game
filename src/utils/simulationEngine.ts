@@ -9,7 +9,11 @@ type NormalizedProbabilities = {
 
 type SimulateMatchOptions = {
   boostLowerRatedTeam?: boolean;
+  harderForCustomTeam?: boolean;
+  unbeatenBoostTeamIds?: string[];
 };
+
+const CUSTOM_TEAM_ID = "custom-team";
 
 const getProbabilityBand = (difference: number): ProbabilityBand => {
   const absoluteDifference = Math.abs(difference);
@@ -85,6 +89,61 @@ const applyLowerRatedBoost = (
   return normalizeProbabilities(boosted);
 };
 
+const addWinChance = (
+  probabilities: NormalizedProbabilities,
+  teamKey: "teamAWin" | "teamBWin",
+  boostAmount: number,
+): NormalizedProbabilities => {
+  const opponentKey = teamKey === "teamAWin" ? "teamBWin" : "teamAWin";
+  const boosted = { ...probabilities };
+  let remainingBoost = boostAmount;
+
+  const opponentReduction = Math.min(boosted[opponentKey], remainingBoost);
+  boosted[opponentKey] -= opponentReduction;
+  boosted[teamKey] += opponentReduction;
+  remainingBoost -= opponentReduction;
+
+  if (remainingBoost > 0) {
+    const drawReduction = Math.min(boosted.draw, remainingBoost);
+    boosted.draw -= drawReduction;
+    boosted[teamKey] += drawReduction;
+  }
+
+  return normalizeProbabilities(boosted);
+};
+
+const applyCustomTeamDifficulty = (
+  probabilities: NormalizedProbabilities,
+  teamA: Team,
+  teamB: Team,
+): NormalizedProbabilities => {
+  if (teamA.id === CUSTOM_TEAM_ID) {
+    return addWinChance(probabilities, "teamBWin", 10);
+  }
+
+  if (teamB.id === CUSTOM_TEAM_ID) {
+    return addWinChance(probabilities, "teamAWin", 10);
+  }
+
+  return probabilities;
+};
+
+const applyUnbeatenBottomTenBoost = (
+  probabilities: NormalizedProbabilities,
+  teamA: Team,
+  teamB: Team,
+  boostedTeamIds: string[],
+): NormalizedProbabilities => {
+  const teamABoosted = boostedTeamIds.includes(teamA.id);
+  const teamBBoosted = boostedTeamIds.includes(teamB.id);
+
+  if (teamABoosted === teamBBoosted) {
+    return probabilities;
+  }
+
+  return addWinChance(probabilities, teamABoosted ? "teamAWin" : "teamBWin", 30);
+};
+
 export const weightedRandomResult = (
   probabilities: NormalizedProbabilities,
 ): MatchOutcome => {
@@ -128,9 +187,21 @@ export const simulateMatch = (
   }
 
   const baseProbabilities = getMatchProbabilities(homeTeam, awayTeam);
-  const probabilities = options.boostLowerRatedTeam
+  let probabilities = options.boostLowerRatedTeam
     ? applyLowerRatedBoost(baseProbabilities, homeTeam, awayTeam)
     : baseProbabilities;
+
+  probabilities = applyUnbeatenBottomTenBoost(
+    probabilities,
+    homeTeam,
+    awayTeam,
+    options.unbeatenBoostTeamIds ?? [],
+  );
+
+  if (options.harderForCustomTeam) {
+    probabilities = applyCustomTeamDifficulty(probabilities, homeTeam, awayTeam);
+  }
+
   const outcome = weightedRandomResult(probabilities);
   const { teamAScore, teamBScore } = createPlaceholderScore(outcome);
 
